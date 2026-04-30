@@ -177,50 +177,81 @@ bool ConnectionHandler::parseHttpRequest(const QByteArray &data)
 
     QByteArray headers = data.left(headerEndPos + headerEnd.length());
     QString headerStr = QString::fromUtf8(headers);
+    
+    qDebug() << "=== Parsing HTTP Request ===";
+    qDebug() << "Raw headers (first 500 chars):" << headerStr.left(500);
 
-    QRegularExpression requestLineRegex("^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH)\\s+(http://[^\\s]+)\\s+HTTP/");
-    QRegularExpressionMatch match = requestLineRegex.match(headerStr);
+    int firstLineEnd = headerStr.indexOf("\r\n");
+    if (firstLineEnd == -1) {
+        qDebug() << "Could not find end of first line";
+        return false;
+    }
+    
+    QString firstLine = headerStr.left(firstLineEnd);
+    qDebug() << "First line:" << firstLine;
 
-    if (match.hasMatch()) {
-        QString fullUrl = match.captured(2);
-        QUrl url(fullUrl);
-
-        if (url.isValid() && !url.host().isEmpty()) {
-            m_targetHost = url.host();
-            m_targetPort = url.port(80);
-            m_isHttps = false;
-
-            QString path = url.path();
-            if (path.isEmpty()) {
-                path = "/";
-            }
-            if (url.hasQuery()) {
-                path += "?" + url.query();
-            }
-
-            QString method = match.captured(1);
-            QString httpVersion = headerStr.mid(match.capturedEnd(2)).trimmed().split(" ").first();
-
-            QString newRequestLine = QString("%1 %2 %3\r\n").arg(method, path, httpVersion);
-            QStringList headerLines = headerStr.split("\r\n");
-            QString newHeaders = newRequestLine;
-
-            for (int i = 1; i < headerLines.size(); ++i) {
-                QString line = headerLines[i];
-                if (!line.isEmpty() && !line.startsWith("Proxy-Connection:")) {
-                    newHeaders += line + "\r\n";
-                }
-            }
-            newHeaders += "\r\n";
-
-            m_httpRequest = newHeaders.toUtf8();
-            m_clientBuffer = data.mid(headerEndPos + headerEnd.length());
-
-            return true;
-        }
+    QStringList parts = firstLine.split(" ", QString::SkipEmptyParts);
+    if (parts.size() < 3) {
+        qDebug() << "Invalid first line, expected 3 parts but got:" << parts.size();
+        return false;
     }
 
-    return false;
+    QString method = parts[0];
+    QString fullUrl = parts[1];
+    QString httpVersion = parts[2];
+    
+    qDebug() << "Method:" << method;
+    qDebug() << "Full URL:" << fullUrl;
+    qDebug() << "HTTP Version:" << httpVersion;
+
+    if (!fullUrl.startsWith("http://")) {
+        qDebug() << "URL does not start with http://, maybe this is not an HTTP proxy request?";
+        return false;
+    }
+
+    QUrl url(fullUrl);
+    if (!url.isValid() || url.host().isEmpty()) {
+        qDebug() << "Invalid URL or empty host";
+        return false;
+    }
+
+    m_targetHost = url.host();
+    m_targetPort = url.port(80);
+    m_isHttps = false;
+    
+    qDebug() << "Target host:" << m_targetHost;
+    qDebug() << "Target port:" << m_targetPort;
+
+    QString path = url.path();
+    if (path.isEmpty()) {
+        path = "/";
+    }
+    if (url.hasQuery()) {
+        path += "?" + url.query();
+    }
+    
+    qDebug() << "Path:" << path;
+
+    QString newRequestLine = QString("%1 %2 %3\r\n").arg(method, path, httpVersion);
+    QStringList headerLines = headerStr.split("\r\n");
+    QString newHeaders = newRequestLine;
+
+    for (int i = 1; i < headerLines.size(); ++i) {
+        QString line = headerLines[i];
+        if (!line.isEmpty() && !line.startsWith("Proxy-Connection:")) {
+            newHeaders += line + "\r\n";
+        }
+    }
+    newHeaders += "\r\n";
+
+    m_httpRequest = newHeaders.toUtf8();
+    m_clientBuffer = data.mid(headerEndPos + headerEnd.length());
+    
+    qDebug() << "Modified request (first 300 chars):" << m_httpRequest.left(300);
+    qDebug() << "Body/buffer size:" << m_clientBuffer.size();
+    qDebug() << "=== HTTP Request Parsing Complete ===";
+
+    return true;
 }
 
 bool ConnectionHandler::parseHttpsConnect(const QByteArray &data)
@@ -233,21 +264,55 @@ bool ConnectionHandler::parseHttpsConnect(const QByteArray &data)
 
     QByteArray headers = data.left(headerEndPos);
     QString headerStr = QString::fromUtf8(headers);
+    
+    qDebug() << "=== Parsing HTTPS CONNECT ===";
+    qDebug() << "Raw headers (first 500 chars):" << headerStr.left(500);
 
-    QRegularExpression connectRegex("^CONNECT\\s+([^:\\s]+):(\\d+)\\s+HTTP/");
-    QRegularExpressionMatch match = connectRegex.match(headerStr);
+    int firstLineEnd = headerStr.indexOf("\r\n");
+    if (firstLineEnd == -1) {
+        qDebug() << "Could not find end of first line";
+        return false;
+    }
+    
+    QString firstLine = headerStr.left(firstLineEnd);
+    qDebug() << "First line:" << firstLine;
 
-    if (match.hasMatch()) {
-        m_targetHost = match.captured(1);
-        m_targetPort = match.captured(2).toUInt();
-        m_isHttps = true;
-
-        m_clientBuffer = data.mid(headerEndPos + headerEnd.length());
-
-        return true;
+    if (!firstLine.startsWith("CONNECT ", Qt::CaseInsensitive)) {
+        qDebug() << "Not a CONNECT request";
+        return false;
     }
 
-    return false;
+    QStringList parts = firstLine.split(" ", QString::SkipEmptyParts);
+    if (parts.size() < 2) {
+        qDebug() << "Invalid CONNECT line, expected at least 2 parts but got:" << parts.size();
+        return false;
+    }
+
+    QString hostPort = parts[1];
+    int colonPos = hostPort.indexOf(":");
+    
+    if (colonPos == -1) {
+        qDebug() << "Invalid host:port format, no colon found";
+        return false;
+    }
+
+    m_targetHost = hostPort.left(colonPos);
+    m_targetPort = hostPort.mid(colonPos + 1).toUInt();
+    m_isHttps = true;
+
+    if (m_targetPort == 0) {
+        m_targetPort = 443;
+    }
+    
+    qDebug() << "Target host:" << m_targetHost;
+    qDebug() << "Target port:" << m_targetPort;
+
+    m_clientBuffer = data.mid(headerEndPos + headerEnd.length());
+    
+    qDebug() << "Buffer size after headers:" << m_clientBuffer.size();
+    qDebug() << "=== HTTPS CONNECT Parsing Complete ===";
+
+    return true;
 }
 
 void ConnectionHandler::connectToTarget()
